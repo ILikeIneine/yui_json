@@ -45,8 +45,8 @@ public:
   Json(array_type&& value) noexcept;
 
   // Type:: NUL
-  constexpr Json(std::nullptr_t) noexcept;
-  constexpr Json() noexcept;
+  Json(std::nullptr_t) noexcept;
+  Json() noexcept;
 
 
   template <typename T, typename = decltype(&T::to_json)>
@@ -74,7 +74,7 @@ public:
 
   Json(void*) = delete;
 
-  // type identifier
+  // type tag
   [[nodiscard]] Type type() const;
   [[nodiscard]] bool is_string() const { return type() == Type::STRING; }
   [[nodiscard]] bool is_number() const { return type() == Type::NUMBER; }
@@ -91,7 +91,7 @@ public:
   [[nodiscard]] const array_type& array_items() const;
   [[nodiscard]] const object_type& object_items() const;
   const Json& operator[](size_t i) const;
-  const Json& operator[](std::string_view key) const;
+  const Json& operator[](const std::string& key) const;
 
   // dump
   void dump(std::string& out) const;
@@ -145,6 +145,7 @@ struct null_helper
   bool operator<(const null_helper&) const { return false; }
 };
 
+
 class json_value
 {
 protected:
@@ -155,13 +156,13 @@ protected:
   [[nodiscard]] virtual Json::Type type() const = 0;
   [[nodiscard]] virtual bool equal(const json_value* other) const = 0;
   [[nodiscard]] virtual bool less(const json_value* other) const = 0;
-  [[nodiscard]] virtual void dump(std::string& out) const = 0;
+  virtual void dump(std::string& out) const = 0;
 
-  [[nodiscard]] virtual double number_value() const;
-  [[nodiscard]] virtual int int_value() const;
-  [[nodiscard]] virtual bool bool_value() const;
+  [[nodiscard]] virtual double number_value() const { return 0; }
+  [[nodiscard]] virtual int int_value() const { return 0; }
+  [[nodiscard]] virtual bool bool_value() const { return false; }
+
   [[nodiscard]] virtual const std::string& string_value() const;
-
   [[nodiscard]] virtual const Json::array_type& array_items() const;
   [[nodiscard]] virtual const Json& operator[](size_t i) const;
 
@@ -252,11 +253,17 @@ class json_double final : public value_impl<Json::Type::NUMBER, double>
 {
   [[nodiscard]]
   double
-  number_value() const override { return value_; }
+  number_value() const override
+  {
+    return value_;
+  }
 
   [[nodiscard]]
   int
-  int_value() const override { return static_cast<int>(value_); }
+  int_value() const override
+  {
+    return static_cast<int>(value_);
+  }
 
   bool
   equal(const json_value* other) const override
@@ -291,8 +298,7 @@ public:
   }
 };
 
-class json_string final : public value_impl<
-      Json::Type::STRING, std::string>
+class json_string final : public value_impl<Json::Type::STRING, std::string>
 {
   [[nodiscard]]
   const std::string&
@@ -380,27 +386,25 @@ public:
   }
 };
 
-// some static for const T&
-struct _json_statics
+// some static for const T& accessor
+struct json_statics
 {
-  constexpr std::shared_ptr<json_value> null = std::make_shared<json_null>();
-  constexpr std::shared_ptr<json_value> t    = std::make_shared<json_bolean>(true);
-  constexpr std::shared_ptr<json_value> f    = std::make_shared<
-    json_bolean>(false);
-  constexpr std::string null_string;
-  constexpr Json::array_type null_array;
-  constexpr Json::object_type null_object;
+  inline static const std::shared_ptr<json_value> null = std::make_shared<json_null>();
+  inline static const std::shared_ptr<json_value> t    = std::make_shared<json_bolean>(true);
+  inline static const std::shared_ptr<json_value> f    = std::make_shared<json_bolean>(false);
+  inline static const std::string null_string {};
+  inline static const Json::array_type null_array {};
+  inline static const Json::object_type null_object {};
 };
 
-static constexpr _json_statics statics;
-
+static inline const Json null_json;
 
 // constructors of Json
-constexpr Json::Json() noexcept : value_ptr_(statics.null)
+inline Json::Json() noexcept : value_ptr_(json_statics::null)
 {
 }
 
-constexpr Json::Json(std::nullptr_t) noexcept : value_ptr_(statics.null)
+inline Json::Json(std::nullptr_t) noexcept : value_ptr_(json_statics::null)
 {
 }
 
@@ -441,11 +445,84 @@ inline Json::Json(object_type&& value) noexcept : value_ptr_(std::make_shared<js
 }
 
 // accessor
-
-inline Json::Type Json::type() const
+inline Json::Type
+Json::type() const
 {
   return value_ptr_->type();
 }
+
+inline double
+Json::number_value() const
+{
+  return value_ptr_->number_value();
+}
+
+inline int
+Json::int_value() const
+{
+  return value_ptr_->int_value();
+}
+
+inline bool
+Json::bool_value() const
+{
+  return value_ptr_->bool_value();
+}
+
+inline const std::string&
+Json::string_value() const
+{
+  return value_ptr_->string_value();
+}
+
+inline const Json::array_type&
+Json::array_items() const
+{
+  return value_ptr_->array_items();
+}
+
+inline const Json::object_type&
+Json::object_items() const
+{
+  return value_ptr_->object_item();
+}
+
+inline const Json&
+Json::operator[](size_t i) const
+{
+  return (*value_ptr_)[i];
+}
+
+inline const Json&
+Json::operator[](const std::string& key) const
+{
+  return (*value_ptr_)[key];
+}
+
+inline const std::string&
+json_value::string_value() const
+{
+  return json_statics::null_string;
+}
+
+inline const Json::array_type& 
+json_value::array_items() const
+{
+  return json_statics::null_array;
+}
+
+inline const Json::object_type& 
+json_value::object_item() const
+{
+  return json_statics::null_object;
+}
+
+inline const Json& 
+json_value::operator[](const std::string& key) const
+{
+  return null_json;
+}
+
 
 
 }
