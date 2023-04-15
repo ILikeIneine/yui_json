@@ -5,9 +5,6 @@
 #include <string>
 #include <memory>
 
-#include "json.hpp"
-#include "json.hpp"
-#include "json.hpp"
 
 namespace ine
 {
@@ -24,7 +21,7 @@ public:
   using object_type = std::map<std::string, Json>;
 
 private:
-  std::shared_ptr<json_value> value_ptr_;
+  std::shared_ptr<json_value> inner_value_;
 
 public:
   // Type::STRING 
@@ -45,8 +42,8 @@ public:
   Json(array_type&& value) noexcept;
 
   // Type:: NUL
-  Json(std::nullptr_t) noexcept;
   Json() noexcept;
+  Json(std::nullptr_t) noexcept;
 
 
   template <typename T, typename = decltype(&T::to_json)>
@@ -109,7 +106,7 @@ public:
   bool operator!=(const Json& rhs) const { return !(*this == rhs); }
   bool operator>(const Json& rhs) const { return rhs < *this; }
   bool operator>=(const Json& rhs) const { return !(*this < rhs); }
-  bool operator<=(const Json& rhs) const { return !(rhs < *this); }
+  bool operator<=(const Json& rhs) const { return rhs >= *this; }
 
   using shape = std::initializer_list<std::pair<std::string, Type>>;
   bool is_valid(const shape& types, std::string& err) const;
@@ -145,6 +142,121 @@ struct null_helper
   bool operator<(const null_helper&) const { return false; }
 };
 
+// serialization
+static void dump(null_helper, std::string& out) { out += "null"; }
+
+static void dump(double value, std::string& out)
+{
+  if (std::isfinite(value))
+  {
+    char buf[32];
+    (void)snprintf(buf, sizeof buf, "%.17g", value);
+    out += buf;
+    // out += std::to_string(value);
+  }
+  else
+  {
+    out += "invalid float";
+  }
+}
+
+static void dump(int value, std::string& out) { out += std::to_string(value); }
+
+static void dump(bool value, std::string& out) { out += value ? "true" : "false"; }
+
+static void dump(const std::string& value, std::string& out)
+{
+  out += '"';
+
+  for (size_t i = 0; i < value.size(); ++i)
+  {
+    if (const char ch = value[i]; ch == '\\')
+    {
+      out += R"(\\)";
+    }
+    else if (ch == '"')
+    {
+      out += R"(\")";
+    }
+    else if (ch == '\b')
+    {
+      out += R"(\b)";
+    }
+    else if (ch == '\f')
+    {
+      out += R"(\f)";
+    }
+    else if (ch == '\n')
+    {
+      out += R"(\n)";
+    }
+    else if (ch == '\r')
+    {
+      out += R"(\r)";
+    }
+    else if (ch == '\t')
+    {
+      out += R"(\t)";
+    }
+    else if (static_cast<uint8_t>(ch) <= 0x1f)
+    {
+      char buf[8];
+      (void)snprintf(buf, sizeof buf, "\\u%04x", ch);
+      out += buf;
+    }
+    else if (static_cast<uint8_t>(ch) == 0xe2 &&
+      static_cast<uint8_t>(value[i + 1]) == 0x80 &&
+      static_cast<uint8_t>(value[i + 2]) == 0xa8)
+    {
+      // LS
+      out += R"(\u2028)";
+      i += 2;
+    }
+    else if (static_cast<uint8_t>(ch) == 0xe2 &&
+      static_cast<uint8_t>(value[i + 1]) == 0x80 &&
+      static_cast<uint8_t>(value[i + 2]) == 0xa9)
+    {
+      // PS
+      out += R"(\u2029)";
+      i += 2;
+    }
+    else
+    {
+      out += ch;
+    }
+  }
+  out += '"';
+}
+
+static void dump(const Json::array_type& values, std::string& out)
+{
+  bool first = true;
+  out += '[';
+  for(const auto& value : values)
+  {
+    if (!first)
+      out += ", ";
+    first = false;
+    value.dump(out);
+  }
+  out += ']';
+}
+static void dump(const Json::object_type& values, std::string& out)
+{
+  bool first = true;
+  out += '{';
+  for(const auto& [name, value] : values)
+  {
+    if (!first)
+      out += ", ";
+    first = false;
+
+    dump(name, out);
+    out += ": ";
+    value.dump(out);
+  }
+  out += '}';
+}
 
 class json_value
 {
@@ -215,8 +327,7 @@ protected:
   void dump(std::string& out) const override
 
   {
-    // todo: to be implemented
-    // ine::dump(value_, out);
+    ine::dump(value_, out);
   }
 };
 
@@ -328,14 +439,7 @@ class json_array final : public value_impl<Json::Type::ARRAY, Json::array_type>
     return value_;
   }
 
-  const Json&
-  operator[](size_t i) const override
-  {
-    if (i > value_.size())
-      return nullptr;
-
-    return value_[i];
-  }
+  const Json& operator[](size_t i) const override;
 
 public:
   explicit json_array(const Json::array_type& value)
@@ -359,12 +463,7 @@ class json_object final : public value_impl<Json::Type::OBJECT, Json::object_typ
   }
 
   [[nodiscard]]
-  const Json&
-  operator[](const std::string& key) const override
-  {
-    const auto& iter = value_.find(key);
-    return iter == value_.end() ? nullptr : iter->second;
-  }
+  const Json& operator[](const std::string& key) const override;
 
 public:
   explicit json_object(const Json::object_type& value)
@@ -392,55 +491,55 @@ struct json_statics
   inline static const std::shared_ptr<json_value> null = std::make_shared<json_null>();
   inline static const std::shared_ptr<json_value> t    = std::make_shared<json_bolean>(true);
   inline static const std::shared_ptr<json_value> f    = std::make_shared<json_bolean>(false);
-  inline static const std::string null_string {};
-  inline static const Json::array_type null_array {};
-  inline static const Json::object_type null_object {};
+  inline static const std::string null_string{};
+  inline static const Json::array_type null_array{};
+  inline static const Json::object_type null_object{};
 };
 
-static inline const Json null_json;
+inline const Json null_json;
 
 // constructors of Json
-inline Json::Json() noexcept : value_ptr_(json_statics::null)
+inline Json::Json() noexcept : inner_value_(json_statics::null)
 {
 }
 
-inline Json::Json(std::nullptr_t) noexcept : value_ptr_(json_statics::null)
+inline Json::Json(std::nullptr_t) noexcept : inner_value_(json_statics::null)
 {
 }
 
-inline Json::Json(double value) : value_ptr_(std::make_shared<json_double>(value))
+inline Json::Json(double value) : inner_value_(std::make_shared<json_double>(value))
 {
 }
 
-inline Json::Json(int value) : value_ptr_(std::make_shared<json_int>(value))
+inline Json::Json(int value) : inner_value_(std::make_shared<json_int>(value))
 {
 }
 
-inline Json::Json(const char* value) : value_ptr_(std::make_shared<json_string>(value))
+inline Json::Json(const char* value) : inner_value_(std::make_shared<json_string>(value))
 {
 }
 
-inline Json::Json(const std::string& value) : value_ptr_(std::make_shared<json_string>(value))
+inline Json::Json(const std::string& value) : inner_value_(std::make_shared<json_string>(value))
 {
 }
 
-inline Json::Json(std::string&& value) noexcept : value_ptr_(std::make_shared<json_string>(std::move(value)))
+inline Json::Json(std::string&& value) noexcept : inner_value_(std::make_shared<json_string>(std::move(value)))
 {
 }
 
-inline Json::Json(const array_type& value) : value_ptr_(std::make_shared<json_array>(value))
+inline Json::Json(const array_type& value) : inner_value_(std::make_shared<json_array>(value))
 {
 }
 
-inline Json::Json(array_type&& value) noexcept : value_ptr_(std::make_shared<json_array>(std::move(value)))
+inline Json::Json(array_type&& value) noexcept : inner_value_(std::make_shared<json_array>(std::move(value)))
 {
 }
 
-inline Json::Json(const object_type& value) : value_ptr_(std::make_shared<json_object>(value))
+inline Json::Json(const object_type& value) : inner_value_(std::make_shared<json_object>(value))
 {
 }
 
-inline Json::Json(object_type&& value) noexcept : value_ptr_(std::make_shared<json_object>(std::move(value)))
+inline Json::Json(object_type&& value) noexcept : inner_value_(std::make_shared<json_object>(std::move(value)))
 {
 }
 
@@ -448,55 +547,61 @@ inline Json::Json(object_type&& value) noexcept : value_ptr_(std::make_shared<js
 inline Json::Type
 Json::type() const
 {
-  return value_ptr_->type();
+  return inner_value_->type();
 }
 
 inline double
 Json::number_value() const
 {
-  return value_ptr_->number_value();
+  return inner_value_->number_value();
 }
 
 inline int
 Json::int_value() const
 {
-  return value_ptr_->int_value();
+  return inner_value_->int_value();
 }
 
 inline bool
 Json::bool_value() const
 {
-  return value_ptr_->bool_value();
+  return inner_value_->bool_value();
 }
 
 inline const std::string&
 Json::string_value() const
 {
-  return value_ptr_->string_value();
+  return inner_value_->string_value();
 }
 
 inline const Json::array_type&
 Json::array_items() const
 {
-  return value_ptr_->array_items();
+  return inner_value_->array_items();
 }
 
 inline const Json::object_type&
 Json::object_items() const
 {
-  return value_ptr_->object_item();
+  return inner_value_->object_item();
 }
 
 inline const Json&
 Json::operator[](size_t i) const
 {
-  return (*value_ptr_)[i];
+  return (*inner_value_)[i];
 }
 
 inline const Json&
 Json::operator[](const std::string& key) const
 {
-  return (*value_ptr_)[key];
+  return (*inner_value_)[key];
+}
+
+inline void
+Json::dump(std::string& out) const
+{
+  inner_value_->dump(out);
 }
 
 inline const std::string&
@@ -505,24 +610,167 @@ json_value::string_value() const
   return json_statics::null_string;
 }
 
-inline const Json::array_type& 
+inline const Json::array_type&
 json_value::array_items() const
 {
   return json_statics::null_array;
 }
 
-inline const Json::object_type& 
+inline const Json::object_type&
 json_value::object_item() const
 {
   return json_statics::null_object;
 }
 
-inline const Json& 
-json_value::operator[](const std::string& key) const
+inline const Json&
+json_value::operator[](const std::string&) const
 {
   return null_json;
 }
 
+inline const Json&
+json_value::operator[](size_t i) const
+{
+  return null_json;
+}
+
+inline const Json&
+json_object::operator[](const std::string& key) const
+{
+  const auto iter = value_.find(key);
+  return iter == value_.end() ? null_json : iter->second;
+}
+
+inline const Json&
+json_array::operator[](size_t i) const
+{
+  if (i >= value_.size()) return null_json;
+  return value_[i];
+}
+
+inline bool Json::operator==(const Json& rhs) const
+{
+  if (inner_value_ == rhs.inner_value_)
+    return true;
+  if (inner_value_->type() != rhs.inner_value_->type())
+    return false;
+
+  return inner_value_->equal(rhs.inner_value_.get());
+}
+
+inline bool Json::operator<(const Json& rhs) const
+{
+  if (inner_value_ == rhs.inner_value_)
+    return false;
+  if (inner_value_->type() != rhs.inner_value_->type())
+    return inner_value_->type() < rhs.inner_value_->type();
+
+  return inner_value_->less(rhs.inner_value_.get());
+}
+
+// Parsing helper
+static std::string
+esc(char c)
+{
+  char buf[12];
+  if(static_cast<uint8_t>(c) >= 0x20 && static_cast<uint8_t>(c) <= 0x7f)
+  {
+    (void)snprintf(buf, sizeof buf, "'%c' (%d)", c, c);
+  }
+  else
+  {
+    (void)snprintf(buf, sizeof buf, "(%d)", c);
+  }
+  return { buf };
+}
+
+
+// Parsing
+struct JsonParser final
+{
+  const std::string& str;
+  size_t i;
+  std::string& err;
+  bool failed;
+  const int strategy;
+
+  Json fail(std::string&& msg) { return fail(std::move(msg), Json()); }
+
+  template <typename T>
+  auto fail(std::string&& msg, const T err_ret)
+  {
+    if (!failed)
+      err = std::move(msg);
+    failed = true;
+    return err_ret;
+  }
+
+  // eat until str[i] is not space charactors
+  void consume_whitespace();
+
+  // todo: eat comments
+  bool consume_comment();
+
+  // eat until str[i] is not space charactors
+  // adn comments
+  void consume_garbage();
+
+  char get_next_token();
+
+  void encode_utf8(long pt, std::string& out)
+  {
+    if (pt < 0)
+      return;
+
+    if (pt < 0x80)
+    {
+      out += static_cast<char>(pt);
+    }
+    else if (pt < 0x800)
+    {
+      out += static_cast<char>((pt >> 6) | 0xC0);
+      out += static_cast<char>((pt & 0x3F) | 0x80);
+    }
+    else if (pt < 0x10000)
+    {
+      out += static_cast<char>((pt >> 12) | 0xE0);
+      out += static_cast<char>(((pt >> 6) & 0x3F) | 0x80);
+      out += static_cast<char>((pt & 0x3F) | 0x80);
+    }
+    else
+    {
+      out += static_cast<char>((pt >> 18) | 0xF0);
+      out += static_cast<char>(((pt >> 12) & 0x3F) | 0x80);
+      out += static_cast<char>(((pt >> 6) & 0x3F) | 0x80);
+      out += static_cast<char>((pt & 0x3F) | 0x80);
+    }
+  }
+
+
+  std::string parse_string();
+
+  Json parse_number();
+
+  Json expect(const std::string& expected, Json res);
+
+  Json parse_json(int depth);
+
+};
+
+
+inline Json
+Json::parse(const std::string& in, std::string& err)
+{
+  JsonParser parser(in, 0, err, false, 0);
+  Json result = parser.parse_json(0);
+
+  parser.consume_garbage();
+  if (parser.failed)
+    return {};
+  if (parser.i != in.size())
+    return parser.fail("unexpected trailing" + esc(in[parser.i]));
+  
+}
 
 
 }
