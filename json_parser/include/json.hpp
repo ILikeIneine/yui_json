@@ -8,6 +8,8 @@
 
 namespace ine
 {
+constexpr int max_depth = 200;
+
 class json_value;
 
 // basic Json
@@ -232,7 +234,7 @@ static void dump(const Json::array_type& values, std::string& out)
 {
   bool first = true;
   out += '[';
-  for(const auto& value : values)
+  for (const auto& value : values)
   {
     if (!first)
       out += ", ";
@@ -241,11 +243,12 @@ static void dump(const Json::array_type& values, std::string& out)
   }
   out += ']';
 }
+
 static void dump(const Json::object_type& values, std::string& out)
 {
   bool first = true;
   out += '{';
-  for(const auto& [name, value] : values)
+  for (const auto& [name, value] : values)
   {
     if (!first)
       out += ", ";
@@ -673,7 +676,7 @@ static std::string
 esc(char c)
 {
   char buf[12];
-  if(static_cast<uint8_t>(c) >= 0x20 && static_cast<uint8_t>(c) <= 0x7f)
+  if (static_cast<uint8_t>(c) >= 0x20 && static_cast<uint8_t>(c) <= 0x7f)
   {
     (void)snprintf(buf, sizeof buf, "'%c' (%d)", c, c);
   }
@@ -681,7 +684,14 @@ esc(char c)
   {
     (void)snprintf(buf, sizeof buf, "(%d)", c);
   }
-  return { buf };
+  return {buf};
+}
+
+template <typename T, typename U, typename L>
+constexpr static bool
+in_range(T x, L lower, U upper)
+{
+  return x >= lower && x <= upper;
 }
 
 
@@ -706,18 +716,34 @@ struct JsonParser final
   }
 
   // eat until str[i] is not space charactors
-  void consume_whitespace();
+  void consume_whitespace()
+  {
+    while (str[i] == ' ' || str[i] == '\n' || str[i] == '\t' || str[i] == '\r') ++i;
+  }
 
   // todo: eat comments
   bool consume_comment();
 
   // eat until str[i] is not space charactors
   // adn comments
-  void consume_garbage();
+  void consume_garbage()
+  {
+    consume_whitespace();
+    // todo: consume comment? (c-like)
+  }
 
-  char get_next_token();
+  char get_next_token()
+  {
+    consume_garbage();
+    if (failed)
+      return fail("unexpected token", static_cast<char>(0));
+    if (i == str.size())
+      return fail("unexpected end of json", static_cast<char>(0));
 
-  void encode_utf8(long pt, std::string& out)
+    return str[i++];
+  }
+
+  void encode_as_utf8(long pt, std::string& out)
   {
     if (pt < 0)
       return;
@@ -747,14 +773,210 @@ struct JsonParser final
   }
 
 
-  std::string parse_string();
+  std::string parse_string()
+  {
+    std::string token_str;
+    long last_escaped = -1;
+    while (true)
+    {
+      char ch = str[i++];
+      if (ch == '"')
+      {
+        encode_as_utf8(last_escaped, token_str);
+        return token_str;
+      }
+      if (ch >= 0 && ch <= 0x1f)
+        return fail("unexpected string token :" + esc(ch), "");
+
+      if (ch != '\\')
+      {
+        encode_as_utf8(last_escaped, token_str);
+        last_escaped = -1;
+        token_str += ch;
+        continue;
+      }
+
+      // from here is escaped chars
+      if (i == str.size())
+        return fail("unexpected end of string", "");
+
+      // get next token after '//'
+      ch = get_next_token();
+
+      // /uxxxx
+      if (ch == 'u')
+      {
+        auto esc = str.substr(i, 4);
+
+        if (esc.size() < 4)
+        {
+          return fail("unexpected \\u escape(error length): " + esc, "");
+        }
+
+        for (size_t j = 0; j < 4; ++j)
+        {
+          if ((esc[j] < 'a' || esc[j] > 'f')
+            || (esc[j] < 'A' || esc[j] > 'F')
+            || (esc[j] < '0' || esc[j] > '9'))
+            return fail("unexpected \\u escape(error content): " + esc[j], "");
+        }
+
+        auto code_point = strtol(esc.data(), nullptr, 16);
+        if(in_range(last_escaped, 0xD800, 0xDBFF) && in_range(code_point, 0xDC00, 0xDFFF))
+        {
+          encode_as_utf8(((last_escaped - 0xD800) << 10 | (code_point - 0xDC00)) + 0x10000, token_str);
+          last_escaped = -1;
+        }
+        else
+        {
+          encode_as_utf8(last_escaped, token_str);
+          last_escaped = code_point;
+        }
+
+        i += 4;
+        continue;
+      }
+
+      encode_as_utf8(last_escaped, token_str);
+      last_escaped = -1;
+
+      // \b
+      if(ch == 'b')
+      {
+        token_str += '\b';
+      }
+      // \f
+      else if(ch == 'f')
+      {
+        token_str += '\f';
+      }
+      // \n
+      else if(ch == 'n')
+      {
+        token_str += '\n';
+      }
+      // \r
+      else if(ch == 'r')
+      {
+        token_str += '\r';
+      }
+      // \t
+      else if(ch == 't')
+      {
+        token_str += '\t';
+      }
+      // " \ /
+      else if( ch == '"' || ch == '\\' || ch == '/')
+      {
+        token_str += ch;
+      }
+      else
+      {
+        return fail("invalid escape char: " + esc(ch), "");
+      }
+    }
+  }
 
   Json parse_number();
 
   Json expect(const std::string& expected, Json res);
 
-  Json parse_json(int depth);
+  Json parse_json(int depth)
+  {
+    if (depth > max_depth)
+    {
+      return fail("exceeded max depth");
+    }
 
+    char ch = get_next_token();
+    if (failed) return {};
+
+    // numeric
+    if (ch == '-' || (ch >= '0' && ch <= '9'))
+    {
+      i--;
+      return parse_number();
+    }
+
+    // boolean
+    if (ch == 't')
+      return expect("true", true);
+    if (ch == 'f')
+      return expect("false", false);
+
+    // null
+    if (ch == 'n')
+      return expect("null", {});
+
+    // string
+    if (ch == '"')
+      return parse_string();
+
+    // object
+    if (ch == '{')
+    {
+      Json::object_type data;
+      ch = get_next_token();
+
+      if (ch == '}')
+        return data;
+      while (true)
+      {
+        // abstract the key of string type
+        if (ch != '"')
+          return fail("expected '\"' in object, got ", esc(ch));
+
+        std::string key = parse_string();
+        if (failed)
+          return {};
+
+        ch = get_next_token();
+        if (ch != ':')
+          return fail("expected ':' in object, got ", esc(ch));
+
+        data[std::move(key)] = parse_json(depth + 1);
+        if (failed)
+          return {};
+
+        ch = get_next_token();
+        if (ch == '}')
+          break;
+        if (ch != ',')
+          return fail("expected ':' in object, got ", esc(ch));
+
+        ch = get_next_token();
+      }
+      return data;
+    }
+
+    if (ch == '[')
+    {
+      Json::array_type data;
+      ch = get_next_token();
+      if (ch == ']')
+        return data;
+
+      while (true)
+      {
+        i--;
+        data.push_back(parse_json(depth + 1));
+        if (failed)
+          return {};
+
+        ch = get_next_token();
+        if (ch == ']')
+          break;
+
+        if (ch != ',')
+          return fail("expected ',' in list, got ", esc(ch));
+
+        get_next_token();
+      }
+      return data;
+    }
+
+    return fail("expected value, got ", esc(ch));
+  }
 };
 
 
@@ -769,8 +991,29 @@ Json::parse(const std::string& in, std::string& err)
     return {};
   if (parser.i != in.size())
     return parser.fail("unexpected trailing" + esc(in[parser.i]));
-  
+
+  return result;
 }
 
+inline bool
+Json::is_valid(const shape& types, std::string& err) const
+{
+  if (!is_object())
+  {
+    err = "expected JSON object, got " + dump();
+    return false;
+  }
 
+  const auto& obj_items = object_items();
+  for (auto& [name, type] : types)
+  {
+    const auto it = obj_items.find(name);
+    if (it == object_items().end() || type != it->second.type())
+    {
+      err = "bad type for " + name + "in " + dump();
+      return false;
+    }
+  }
+  return true;
+}
 }
