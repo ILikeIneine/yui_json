@@ -1,4 +1,5 @@
 #pragma once
+#include <cassert>
 #include <type_traits>
 #include <vector>
 #include <map>
@@ -779,6 +780,9 @@ struct JsonParser final
     long last_escaped = -1;
     while (true)
     {
+      if (i >= str.size())
+        return fail("unexpected end while parsing string", "");
+
       char ch = str[i++];
       if (ch == '"')
       {
@@ -803,7 +807,8 @@ struct JsonParser final
       // get next token after '//'
       ch = get_next_token();
 
-      // /uxxxx
+      // unicode!!!!!!!!
+      // todo: got something fucking error with this shit
       if (ch == 'u')
       {
         auto esc = str.substr(i, 4);
@@ -818,12 +823,22 @@ struct JsonParser final
           if ((esc[j] < 'a' || esc[j] > 'f')
             || (esc[j] < 'A' || esc[j] > 'F')
             || (esc[j] < '0' || esc[j] > '9'))
-            return fail("unexpected \\u escape(error content): " + esc[j], "");
+            return fail("unexpected \\u escape(error content): " + esc, "");
         }
 
-        auto code_point = strtol(esc.data(), nullptr, 16);
-        if(in_range(last_escaped, 0xD800, 0xDBFF) && in_range(code_point, 0xDC00, 0xDFFF))
+        // JSON specifies that characters outside the BMP shall be encoded as a
+        // pair of 4-hex-digit \u escapes encoding their surrogate pair
+        // components. Check whether we're in the middle of such a beast: the
+        // previous codepoint was an escaped lead (high) surrogate, and this is
+        // a trail (low) surrogate.
+        // ref: https://zhuanlan.zhihu.com/p/370601172
+        if (const auto code_point = strtol(esc.data(), nullptr, 16);
+          in_range(last_escaped, 0xD800, 0xDBFF) && in_range(code_point, 0xDC00, 0xDFFF))
         {
+          // plain section
+          // x' = yyyyyyyyyyxxxxxxxxxx   // x - 0x10000
+          // x1' = 110110yyyyyyyyyy      // 0xD800 + yyyyyyyyyy
+          // x2' = 110111xxxxxxxxxx      // 0xDC00 + xxxxxxxxxx
           encode_as_utf8(((last_escaped - 0xD800) << 10 | (code_point - 0xDC00)) + 0x10000, token_str);
           last_escaped = -1;
         }
@@ -841,32 +856,32 @@ struct JsonParser final
       last_escaped = -1;
 
       // \b
-      if(ch == 'b')
+      if (ch == 'b')
       {
         token_str += '\b';
       }
       // \f
-      else if(ch == 'f')
+      else if (ch == 'f')
       {
         token_str += '\f';
       }
       // \n
-      else if(ch == 'n')
+      else if (ch == 'n')
       {
         token_str += '\n';
       }
       // \r
-      else if(ch == 'r')
+      else if (ch == 'r')
       {
         token_str += '\r';
       }
       // \t
-      else if(ch == 't')
+      else if (ch == 't')
       {
         token_str += '\t';
       }
       // " \ /
-      else if( ch == '"' || ch == '\\' || ch == '/')
+      else if (ch == '"' || ch == '\\' || ch == '/')
       {
         token_str += ch;
       }
@@ -877,9 +892,79 @@ struct JsonParser final
     }
   }
 
-  Json parse_number();
+  Json parse_number()
+  {
+    const auto start_pos = i;
+    if (str[i] == '-')
+      i++;
 
-  Json expect(const std::string& expected, Json res);
+    if(str[i] == '0')
+    {
+      i++;
+      if (in_range(str[i], '0', '9'))
+        return fail("leading zero is not valid in numbers");
+    }
+    else if(in_range(str[i], '1', '9'))
+    {
+      while (in_range(str[++i], '0', '9')) ;
+    }
+    else
+    {
+      return fail("invalid " + esc(str[i]) + " in number");
+    }
+
+    if(str[i] != '.' 
+      && str[i] != 'e' 
+      && str[i] != 'E' 
+      && (i-start_pos) <= static_cast<size_t>(std::numeric_limits<int>::digits10))
+    {
+      // todo: bugs here
+      return std::atoi(str.c_str() + start_pos);
+    }
+
+    // 1.2E+10
+    //  ^----------- Decimal
+    if(str[i] == '.')
+    {
+      i++;
+      if(!in_range(str[i], '0', '9'))
+      {
+        return fail("not valid Decimal-Part number consistance");
+      }
+
+      while (in_range(str[i], '0', '9')) i++;
+    }
+
+    // 1.2E+10
+    //    ^-------  Exp
+    if(str[i] == 'e' || str[i] == 'E')
+    {
+      i++;
+      if (str[i] == '+' || str[i] == '-')
+        i++;
+
+      if (!in_range(str[i], '0', '9'))
+        return fail("at least one digit required in exponencial part");
+
+      while (in_range(str[i], '0', '9')) ++i;
+    }
+    return strtod(str.c_str() + start_pos, nullptr);
+  }
+
+  Json expect(const std::string& expected, Json res)
+  {
+    // there must be a char for we to expect
+    // in another word, we can't expected at beginning
+    assert(i != 0);
+    i--;
+    if (str.compare(i, expected.size(), expected) == 0)
+    {
+      i += str.size();
+      return res;
+    }
+
+    return fail("parse error, expected: " + expected + " but got: " + str.substr(i, expected.length()));
+  }
 
   Json parse_json(int depth)
   {
@@ -924,7 +1009,7 @@ struct JsonParser final
       {
         // abstract the key of string type
         if (ch != '"')
-          return fail("expected '\"' in object, got ", esc(ch));
+          return fail("expected '\"' in object, got " + esc(ch));
 
         std::string key = parse_string();
         if (failed)
@@ -932,7 +1017,7 @@ struct JsonParser final
 
         ch = get_next_token();
         if (ch != ':')
-          return fail("expected ':' in object, got ", esc(ch));
+          return fail("expected ':' in object, got " + esc(ch));
 
         data[std::move(key)] = parse_json(depth + 1);
         if (failed)
@@ -942,7 +1027,7 @@ struct JsonParser final
         if (ch == '}')
           break;
         if (ch != ',')
-          return fail("expected ':' in object, got ", esc(ch));
+          return fail("expected ',' in object, got " + esc(ch));
 
         ch = get_next_token();
       }
@@ -968,14 +1053,14 @@ struct JsonParser final
           break;
 
         if (ch != ',')
-          return fail("expected ',' in list, got ", esc(ch));
+          return fail("expected ',' in list, got " + esc(ch));
 
         get_next_token();
       }
       return data;
     }
 
-    return fail("expected value, got ", esc(ch));
+    return fail("expected value, got " + esc(ch));
   }
 };
 
